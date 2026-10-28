@@ -15,7 +15,32 @@ where the money actually goes.
 - **Category breakdown** — a donut chart of this month's spending, drawn directly on a
   `<canvas>` with no charting library
 - **Custom categories** — add or remove your own
+- **CSV import** — drop in a bank statement export and it populates the dashboard
 - **Sample data** — loads automatically on a first visit so the page is never empty
+
+## Importing a bank statement
+
+Bank exports do not agree on much, so columns are matched by header name rather than
+position. The importer handles:
+
+| Variation | Example |
+| --- | --- |
+| A single signed amount column | `Amount` with `-82.40` for spending |
+| Separate debit and credit columns | `Debit` / `Credit` |
+| Parenthesised negatives | `(1250.00)` |
+| Several date formats | `2026-10-02`, `10/02/2026`, `4 Oct 2026`, `Oct 4, 2026` |
+| Quoted fields containing commas | `"COMCAST CABLE, INC"` |
+| An Excel byte-order mark | stripped before parsing |
+
+If the file has no category column, categories are guessed from the description with a
+keyword table, so `WHOLEFDS MKT #123` lands in Food and `SHELL OIL 4411` in Transport.
+
+Nothing is committed until you accept the preview, which shows the detected column mapping,
+a sample of the parsed rows and a count of anything skipped. Income and expense are inferred
+from the sign of the amount, and because some banks sign the other way there is a single
+button to flip them.
+
+The file is read in the browser with `FileReader`. It is never uploaded.
 
 Everything persists to `localStorage`, so your data survives a refresh and never leaves
 your browser.

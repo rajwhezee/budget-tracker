@@ -133,6 +133,33 @@
   .cat button:hover { color: var(--red); }
   .inline-form { display: flex; gap: 8px; max-width: 420px; }
 
+  /* import preview */
+  .backdrop {
+    position: fixed; inset: 0; z-index: 50;
+    background: rgba(0,0,0,.28);
+    -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px);
+    display: flex; align-items: center; justify-content: center; padding: 20px;
+  }
+  .modal {
+    background: #fff; border-radius: 18px; width: 100%; max-width: 680px;
+    max-height: 86vh; display: flex; flex-direction: column;
+    box-shadow: 0 24px 60px rgba(0,0,0,.22);
+  }
+  .modal header { padding: 22px 24px 14px; border-bottom: 1px solid var(--hairline); }
+  .modal h3 { font-size: 19px; font-weight: 600; letter-spacing: -.02em; }
+  .modal .sub { font-size: 14px; color: var(--muted); margin-top: 5px; }
+  .modal .body { padding: 18px 24px; overflow: auto; }
+  .modal footer { padding: 16px 24px 20px; border-top: 1px solid var(--hairline); display: flex; gap: 10px; justify-content: flex-end; border-radius: 0 0 18px 18px; margin: 0; }
+  .map { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 16px; }
+  .map span { font-size: 12.5px; background: var(--pill); border-radius: 999px; padding: 5px 12px; }
+  .map span b { font-weight: 600; }
+  .map span.miss { color: var(--muted); }
+  .prev { width: 100%; border-collapse: collapse; font-size: 14px; }
+  .prev th { font-size: 11px; padding: 0 7px 7px; }
+  .prev td { padding: 8px 7px; font-size: 14px; }
+  .warn { font-size: 13.5px; color: var(--red); margin-top: 12px; }
+  .hint { font-size: 13px; color: var(--muted); margin-top: 14px; line-height: 1.5; }
+
   footer { border-top: 1px solid var(--hairline); padding: 28px 0 56px; margin-top: 20px; }
   footer p { font-size: 13px; color: var(--muted); }
 
@@ -159,9 +186,11 @@
   <div class="wrap">
     <div class="brand">Budget Tracker <span>· demo</span></div>
     <div class="top-actions">
+      <button class="btn" id="importBtn">Import CSV</button>
       <button class="btn" id="seedBtn">Load sample data</button>
       <button class="btn danger" id="resetBtn">Clear all</button>
     </div>
+    <input type="file" id="csvInput" accept=".csv,text/csv" hidden />
   </div>
 </header>
 
@@ -597,6 +626,249 @@
   el('seedBtn').addEventListener('click', function () {
     state = seed();
     save(); renderAll();
+  });
+
+  /* ---------------- CSV import ----------------
+     Bank exports vary wildly, so columns are detected by header name rather
+     than position, and nothing is committed until the preview is accepted. */
+
+  // RFC-4180-ish: handles quoted fields, escaped quotes and CRLF
+  function parseCSV(text) {
+    var rows = [], row = [], cur = '', inQ = false;
+    text = text.replace(/^﻿/, '');            // strip BOM from Excel exports
+    for (var i = 0; i < text.length; i++) {
+      var ch = text[i];
+      if (inQ) {
+        if (ch === '"') {
+          if (text[i + 1] === '"') { cur += '"'; i++; } else { inQ = false; }
+        } else cur += ch;
+      } else if (ch === '"') { inQ = true; }
+      else if (ch === ',') { row.push(cur); cur = ''; }
+      else if (ch === '\n' || ch === '\r') {
+        if (ch === '\r' && text[i + 1] === '\n') i++;
+        row.push(cur); cur = '';
+        if (row.some(function (c) { return c.trim() !== ''; })) rows.push(row);
+        row = [];
+      } else cur += ch;
+    }
+    row.push(cur);
+    if (row.some(function (c) { return c.trim() !== ''; })) rows.push(row);
+    return rows;
+  }
+
+  function findCol(headers, patterns) {
+    for (var p = 0; p < patterns.length; p++) {
+      for (var i = 0; i < headers.length; i++) {
+        if (patterns[p].test(headers[i])) return i;
+      }
+    }
+    return -1;
+  }
+
+  function parseAmount(raw) {
+    if (raw == null) return NaN;
+    var s = String(raw).trim();
+    if (!s) return NaN;
+    var neg = /^\(.*\)$/.test(s) || /^-/.test(s);   // (24.50) is negative too
+    s = s.replace(/[()]/g, '').replace(/[^0-9.\-]/g, '').replace(/-/g, '');
+    var n = parseFloat(s);
+    if (!isFinite(n)) return NaN;
+    return neg ? -n : n;
+  }
+
+  var MONTHS = { jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12 };
+  function parseDate(raw) {
+    var s = String(raw || '').trim();
+    if (!s) return null;
+    var m;
+    if ((m = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/)))      // 2026-03-04
+      return iso(m[1], m[2], m[3]);
+    if ((m = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})/))) {  // 03/04/2026, US order
+      var y = m[3].length === 2 ? '20' + m[3] : m[3];
+      return iso(y, m[1], m[2]);
+    }
+    if ((m = s.match(/^(\d{1,2})\s+([A-Za-z]{3})[a-z]*\s+(\d{4})/)))   // 4 Mar 2026
+      return iso(m[3], MONTHS[m[2].toLowerCase()], m[1]);
+    if ((m = s.match(/^([A-Za-z]{3})[a-z]*\s+(\d{1,2}),?\s+(\d{4})/))) // Mar 4, 2026
+      return iso(m[3], MONTHS[m[1].toLowerCase()], m[2]);
+    var d = new Date(s);
+    return isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+  }
+  function iso(y, mo, d) {
+    if (!mo) return null;
+    mo = String(mo); d = String(d);
+    return y + '-' + (mo.length < 2 ? '0' + mo : mo) + '-' + (d.length < 2 ? '0' + d : d);
+  }
+
+  // keyword -> category, checked against the description
+  var RULES = [
+    [/grocer|market|wholefds|whole foods|trader joe|safeway|kroger|aldi|costco|food|restaurant|cafe|coffee|starbucks|mcdonald|pizza|chipotle|doordash|uber ?eats|grubhub|dining/i, 'Food'],
+    [/uber|lyft|shell|exxon|chevron|bp |fuel|gas station|transit|metro|mta|parking|amtrak|airline|delta air|united air|southwest/i, 'Transport'],
+    [/rent|mortgage|landlord|property|apartment|leasing/i, 'Housing'],
+    [/electric|water util|utility|comcast|xfinity|verizon|at&t|t-mobile|spectrum|internet|wifi|phone bill/i, 'Utilities'],
+    [/pharmacy|cvs|walgreen|doctor|dental|clinic|hospital|medical|health/i, 'Health'],
+    [/netflix|spotify|hulu|disney|cinema|theat|steam|playstation|xbox|gym|concert/i, 'Fun'],
+    [/payroll|salary|direct dep|dir dep|paycheck/i, 'Salary']
+  ];
+  function guessCategory(desc, fallback) {
+    for (var i = 0; i < RULES.length; i++) if (RULES[i][0].test(desc)) return RULES[i][1];
+    return fallback || 'Other';
+  }
+
+  function readCSV(text) {
+    var rows = parseCSV(text);
+    if (rows.length < 2) return { error: 'That file has no data rows.' };
+
+    var head = rows[0].map(function (h) { return h.trim(); });
+    var iDate = findCol(head, [/^date$/i, /post(ed)?.*date|date.*post/i, /date/i]);
+    var iDesc = findCol(head, [/^(description|name|merchant|payee)$/i, /desc|merchant|payee|memo|detail|narrat/i]);
+    var iAmt  = findCol(head, [/^amount$/i, /amount|amt|value/i]);
+    var iDeb  = findCol(head, [/debit|withdraw/i]);
+    var iCre  = findCol(head, [/credit|deposit/i]);
+    var iCat  = findCol(head, [/^category$/i, /category/i]);
+
+    if (iDate < 0) return { error: 'No date column found. Expected a header containing "date".' };
+    if (iAmt < 0 && iDeb < 0 && iCre < 0) {
+      return { error: 'No amount column found. Expected "amount", or "debit" and "credit".' };
+    }
+
+    var out = [], skipped = 0;
+    for (var r = 1; r < rows.length; r++) {
+      var cells = rows[r];
+      var date = parseDate(cells[iDate]);
+      var amt = NaN, type = 'expense';
+
+      if (iAmt >= 0 && String(cells[iAmt] || '').trim() !== '') {
+        amt = parseAmount(cells[iAmt]);
+        type = amt < 0 ? 'expense' : 'income';   // most exports sign spending negative
+      } else {
+        var deb = iDeb >= 0 ? parseAmount(cells[iDeb]) : NaN;
+        var cre = iCre >= 0 ? parseAmount(cells[iCre]) : NaN;
+        if (isFinite(deb) && deb !== 0) { amt = deb; type = 'expense'; }
+        else if (isFinite(cre) && cre !== 0) { amt = cre; type = 'income'; }
+      }
+
+      if (!date || !isFinite(amt) || amt === 0) { skipped++; continue; }
+
+      var desc = (iDesc >= 0 ? String(cells[iDesc] || '') : '').trim() || 'Imported transaction';
+      var rawCat = iCat >= 0 ? String(cells[iCat] || '').trim() : '';
+      out.push({
+        type: type,
+        desc: desc,
+        amount: Math.round(Math.abs(amt) * 100) / 100,
+        category: rawCat || guessCategory(desc, type === 'income' ? 'Salary' : 'Other'),
+        date: date
+      });
+    }
+
+    return {
+      rows: out, skipped: skipped,
+      map: { date: head[iDate], desc: iDesc >= 0 ? head[iDesc] : null,
+             amount: iAmt >= 0 ? head[iAmt] : null,
+             debit: iDeb >= 0 ? head[iDeb] : null, credit: iCre >= 0 ? head[iCre] : null,
+             category: iCat >= 0 ? head[iCat] : null }
+    };
+  }
+
+  /* ---------- preview dialog ---------- */
+  var pending = null, flipped = false;
+
+  function closeModal() {
+    var b = document.querySelector('.backdrop');
+    if (b) b.remove();
+    pending = null; flipped = false;
+  }
+
+  function showPreview(res, filename) {
+    var back = document.createElement('div');
+    back.className = 'backdrop';
+    back.addEventListener('click', function (e) { if (e.target === back) closeModal(); });
+
+    var inc = res.rows.filter(function (t) { return t.type === 'income'; }).length;
+    var mapBits = [];
+    ['date','desc','amount','debit','credit','category'].forEach(function (k) {
+      if (res.map[k]) mapBits.push('<span><b>' + k + '</b> → ' + esc(res.map[k]) + '</span>');
+    });
+    if (!res.map.category) mapBits.push('<span class="miss">category → auto-detected</span>');
+
+    var sample = res.rows.slice(0, 6).map(function (t) {
+      return '<tr><td>' + esc(t.desc.slice(0, 34)) + '</td>' +
+             '<td><span class="tag">' + esc(t.category) + '</span></td>' +
+             '<td class="date">' + t.date + '</td>' +
+             '<td class="amt ' + (t.type === 'income' ? 'in' : 'out') + '">' +
+             (t.type === 'income' ? '+' : '−') + '$' + t.amount.toFixed(2) + '</td></tr>';
+    }).join('');
+
+    back.innerHTML =
+      '<div class="modal" role="dialog" aria-modal="true" aria-label="Import preview">' +
+        '<header>' +
+          '<h3>Import ' + res.rows.length + ' transaction' + (res.rows.length === 1 ? '' : 's') + '</h3>' +
+          '<div class="sub">' + esc(filename) + ' · ' + inc + ' income, ' +
+            (res.rows.length - inc) + ' expense' +
+            (res.skipped ? ' · ' + res.skipped + ' row' + (res.skipped === 1 ? '' : 's') + ' skipped' : '') +
+          '</div>' +
+        '</header>' +
+        '<div class="body">' +
+          '<div class="map">' + mapBits.join('') + '</div>' +
+          '<table class="prev"><thead><tr><th>Description</th><th>Category</th><th>Date</th>' +
+          '<th style="text-align:right">Amount</th></tr></thead><tbody>' + sample + '</tbody></table>' +
+          (res.rows.length > 6 ? '<p class="hint">Showing the first 6 of ' + res.rows.length + '.</p>' : '') +
+          '<p class="hint">Income and expense are inferred from the sign of the amount. If they look ' +
+          'backwards for your bank, flip them before importing.</p>' +
+        '</div>' +
+        '<footer>' +
+          '<button class="btn" id="mFlip">Flip income / expense</button>' +
+          '<button class="btn" id="mCancel">Cancel</button>' +
+          '<button class="btn solid" id="mOk">Import</button>' +
+        '</footer>' +
+      '</div>';
+
+    document.body.appendChild(back);
+    pending = res;
+
+    document.getElementById('mCancel').addEventListener('click', closeModal);
+    document.getElementById('mFlip').addEventListener('click', function () {
+      res.rows.forEach(function (t) { t.type = t.type === 'income' ? 'expense' : 'income'; });
+      flipped = !flipped;
+      closeModal();
+      showPreview(res, filename);
+    });
+    document.getElementById('mOk').addEventListener('click', function () {
+      var base = Date.now();
+      res.rows.forEach(function (t, i) {
+        if (state.categories.indexOf(t.category) < 0) state.categories.push(t.category);
+        t.id = base + i;
+        state.transactions.push(t);
+      });
+      save(); closeModal(); renderAll();
+    });
+    document.getElementById('mOk').focus();
+  }
+
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  }
+
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeModal(); });
+
+  el('importBtn').addEventListener('click', function () { el('csvInput').click(); });
+  el('csvInput').addEventListener('change', function (e) {
+    var file = e.target.files && e.target.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function () {
+      var res;
+      try { res = readCSV(String(reader.result)); }
+      catch (err) { res = { error: 'That file could not be read as CSV.' }; }
+      if (res.error) { alert(res.error); }
+      else if (!res.rows.length) { alert('No usable rows found in that file.'); }
+      else { showPreview(res, file.name); }
+      el('csvInput').value = '';   // allow re-importing the same file
+    };
+    reader.onerror = function () { alert('Could not read that file.'); el('csvInput').value = ''; };
+    reader.readAsText(file);
   });
 
   /* ---------- sample data so the page is alive on first visit ---------- */
